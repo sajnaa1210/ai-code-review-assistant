@@ -2,6 +2,10 @@ from backend.review_engine import review_code
 import streamlit as st
 import json
 from datetime import datetime
+import requests
+from urllib.parse import urlparse
+import html
+import streamlit.components.v1 as components
 
 st.set_page_config(
     page_title="AI Code Review Assistant",
@@ -798,7 +802,69 @@ result = add_numbers(5, 3)
 print(f"Result: {result}")''',
 }
 
+
+def parse_github_repo_url(url: str):
+    path = urlparse(url).path.strip("/")
+    parts = path.split("/")
+
+    if len(parts) < 2:
+        raise ValueError("Invalid GitHub repository URL")
+
+    owner = parts[0]
+    repo = parts[1]
+
+    return owner, repo
+
+
+def fetch_github_files(owner, repo, path=""):
+    api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+    response = requests.get(api_url)
+
+    if response.status_code != 200:
+        raise Exception("Could not fetch repository")
+
+    contents = response.json()
+    code_files = []
+
+    allowed_extensions = (
+        ".py", ".js", ".ts", ".java", ".cpp", ".c",
+        ".jsx", ".tsx", ".html", ".css", ".json",
+        ".md", ".yml", ".yaml", ".txt"
+    )
+
+    for item in contents:
+        if item["type"] == "dir":
+            code_files.extend(fetch_github_files(owner, repo, item["path"]))
+
+        elif item["type"] == "file":
+            name = item["name"].lower()
+            has_allowed_ext = name.endswith(allowed_extensions)
+            no_ext = "." not in name
+
+            if has_allowed_ext or no_ext:
+                file_response = requests.get(item["download_url"])
+                if file_response.status_code == 200:
+                    text = file_response.text
+
+                    # Keep extensionless files only if they look like code
+                    if has_allowed_ext or any(
+                        marker in text for marker in [
+                            "def ", "class ", "import ", "from ",
+                            "function ", "#include", "public class",
+                            "<html", "<?php", "console.log"
+                        ]
+                    ):
+                        code_files.append({
+                            "name": item["path"],
+                            "content": text
+                        })
+
+    return code_files 
+
+# EXISTING CODE CONTINUES ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
+
 def demo_review(code: str) -> dict:
+ 
     """Generate mock code review results."""
     issues = []
     lower = code.lower()
@@ -946,12 +1012,38 @@ with col_left:
         placeholder="Paste your code here or select a sample...",
         label_visibility="collapsed",
     )
+    github_url = st.text_input(
+    "GitHub Repository URL",
+    placeholder="https://github.com/owner/repo"
+)
 
-    button_col1, button_col2 = st.columns(2, gap="small")
-    with button_col1:
-        review_clicked = st.button("🔍 Review Code", use_container_width=True, key="review_btn")
-    with button_col2:
-        clear_clicked = st.button("🧹 Clear", use_container_width=True, key="clear_btn")
+github_token = st.text_input(
+    "GitHub Token (optional)",
+    type="password",
+    placeholder="Only needed for private repos"
+)
+button_col1, button_col2, button_col3 = st.columns(3, gap="small")
+
+with button_col1:
+    review_clicked = st.button(
+        "🔍 Review Code",
+        use_container_width=True,
+        key="review_btn"
+    )
+
+with button_col2:
+    clear_clicked = st.button(
+        "🧹 Clear",
+        use_container_width=True,
+        key="clear_btn"
+    )
+
+with button_col3:
+    github_review_clicked = st.button(
+        "🐙 Review GitHub Repo",
+        use_container_width=True,
+        key="github_review_btn"
+    )
 
     if clear_clicked:
         st.session_state.code = ""
@@ -975,7 +1067,132 @@ with col_right:
 
 st.markdown("<div style='margin: 40px 0;'></div>", unsafe_allow_html=True)
 
-# Results Section
+def render_issue_card(issue):
+    issue_type = html.escape(issue.get("type", ""))
+    severity = html.escape(issue.get("severity", "Low"))
+    title = html.escape(issue.get("title", ""))
+    explanation = html.escape(issue.get("explanation", ""))
+    fix = html.escape(issue.get("fix", ""))
+    severity_class = get_severity_color(issue.get("severity", "Low"))
+
+    card_html = f"""
+    <div class="issue-card">
+        <div class="issue-header">
+            <div class="issue-type">{issue_type}</div>
+            <span class="severity-badge {severity_class}">{severity}</span>
+        </div>
+
+        <div class="issue-title">{title}</div>
+
+        <div class="issue-section">
+            <span class="issue-label">Explanation</span>
+            <div class="issue-text">{explanation}</div>
+        </div>
+
+        <div class="issue-section">
+            <span class="issue-label">Recommended Fix</span>
+            <div class="issue-text">{fix}</div>
+        </div>
+    </div>
+    """
+
+    st.markdown(card_html, unsafe_allow_html=True)
+
+
+def safe_review_code(code: str):
+    try:
+        return review_code(code)
+    except Exception:
+        st.warning("Gemini review failed. Falling back to local analysis.")
+        return demo_review(code)
+
+
+if github_review_clicked:
+
+    if not github_url.strip():
+        st.error("Please enter a GitHub repository URL.")
+
+    else:
+        try:
+            owner, repo = parse_github_repo_url(github_url)
+
+            with st.spinner("🐙 Fetching GitHub repository..."):
+                repo_files = fetch_github_files(owner, repo)
+
+            if not repo_files:
+                st.warning("No supported code files found.")
+
+            else:
+                st.success(f"Fetched {len(repo_files)} code files.")
+
+                for repo_file in repo_files:
+
+                    st.markdown(
+                        f"<h3 style='color:#e9d5ff; margin-top:30px;'>📄 {repo_file['name']}</h3>",
+                        unsafe_allow_html=True
+                    )
+
+                    review_data = safe_review_code(repo_file["content"])
+
+                    score = review_data["score"]
+                    high_count = review_data["high_count"]
+                    medium_count = review_data["medium_count"]
+                    total_issues = review_data["total_issues"]
+                    issues = review_data["issues"]
+
+                    st.markdown(f'''
+                    <div class="results-header">
+                        <div class="score-display">
+                            <div class="score-circle">{score}</div>
+                            <div class="score-label">Code Quality Score</div>
+                        </div>
+
+                        <div class="stats-grid">
+
+                            <div class="stat-item">
+                                <div class="stat-number">{total_issues}</div>
+                                <div class="stat-label">Total Issues</div>
+                            </div>
+
+                            <div class="stat-item">
+                                <div class="stat-number" style="color:#fca5a5;">
+                                    {high_count}
+                                </div>
+                                <div class="stat-label">High Severity</div>
+                            </div>
+
+                            <div class="stat-item">
+                                <div class="stat-number" style="color:#fcd34d;">
+                                    {medium_count}
+                                </div>
+                                <div class="stat-label">Medium Severity</div>
+                            </div>
+
+                        </div>
+                    </div>
+                    ''', unsafe_allow_html=True)
+
+                    st.markdown(
+                        "<h3 style='font-size:1.2rem; color:#e9d5ff; margin:20px;'>🔍 Review Results</h3>",
+                        unsafe_allow_html=True
+                    )
+
+                    st.markdown(
+                        '<div class="issues-container" style="padding:0 20px;">',
+                        unsafe_allow_html=True
+                    )
+
+                    for issue in issues:
+                        render_issue_card(issue)
+
+                    st.markdown(
+                        '</div>',
+                        unsafe_allow_html=True
+                    )
+
+        except Exception as e:
+            st.error(f"GitHub Review Error: {str(e)}")
+
 if review_clicked:
     if not code.strip():
         st.markdown('''<div class="empty-state">
@@ -985,7 +1202,7 @@ if review_clicked:
         </div>''', unsafe_allow_html=True)
     else:
         with st.spinner("🔍 Analyzing code..."):
-            review_data   = review_code(code)
+            review_data = safe_review_code(code)
 
         score = review_data["score"]
         high_count = review_data["high_count"]
@@ -1020,28 +1237,9 @@ if review_clicked:
         st.markdown("<h3 style='font-size: 1.375rem; font-weight: 700; color: #e9d5ff; margin: 40px 20px 24px; padding: 0;'>🔍 Review Results</h3>", unsafe_allow_html=True)
 
         st.markdown('<div class="issues-container" style="padding: 0 20px;">', unsafe_allow_html=True)
-
         for issue in issues:
-            severity_class = get_severity_color(issue["severity"])
-            st.markdown(f'''
-            <div class="issue-card">
-                <div class="issue-header">
-                    <div class="issue-type">{issue['type']}</div>
-                    <span class="severity-badge {severity_class}">{issue['severity']}</span>
-                </div>
-                <div class="issue-title">{issue['title']}</div>
-                <div class="issue-section">
-                    <span class="issue-label">Explanation</span>
-                    <div class="issue-text">{issue['explanation']}</div>
-                </div>
-                <div class="issue-section">
-                    <span class="issue-label">Recommended Fix</span>
-                    <div class="issue-text">{issue['fix']}</div>
-                </div>
-                f'<div class="code-snippet">{issue.get("snippet", "")}</div>' if issue.get("snippet") else ''
-            </div>
-            ''', unsafe_allow_html=True)
-
+            render_issue_card(issue)
         st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown('</div>', unsafe_allow_html=True)
+
