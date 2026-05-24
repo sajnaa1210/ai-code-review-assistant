@@ -1,3 +1,4 @@
+from backend.review_engine import review_code
 import streamlit as st
 import json
 from datetime import datetime
@@ -984,7 +985,7 @@ if review_clicked:
         </div>''', unsafe_allow_html=True)
     else:
         with st.spinner("🔍 Analyzing code..."):
-            review_data = demo_review(code)
+            review_data   = review_code(code)
 
         score = review_data["score"]
         high_count = review_data["high_count"]
@@ -1037,7 +1038,7 @@ if review_clicked:
                     <span class="issue-label">Recommended Fix</span>
                     <div class="issue-text">{issue['fix']}</div>
                 </div>
-                {f'<div class="issue-section"><span class="issue-label">Code Location</span><div class="code-snippet">{issue["snippet"]}</div></div>' if issue['snippet'] else ''}
+                f'<div class="code-snippet">{issue.get("snippet", "")}</div>' if issue.get("snippet") else ''
             </div>
             ''', unsafe_allow_html=True)
 
